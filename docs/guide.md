@@ -4,6 +4,7 @@ This guide provides step-by-step instructions to deploy a K3s Kubernetes cluster
 
 ## Table of Contents
 
+### Phase 1: K3s Cluster
 1. [Prerequisites](#prerequisites)
 2. [AWS Configuration](#aws-configuration)
 3. [Project Setup](#project-setup)
@@ -13,6 +14,12 @@ This guide provides step-by-step instructions to deploy a K3s Kubernetes cluster
 7. [Accessing the Cluster](#accessing-the-cluster)
 8. [Cleanup](#cleanup)
 9. [Troubleshooting](#troubleshooting)
+
+### Phase 2: Autoscaler
+10. [Prometheus and Autoscaler Setup](#phase-2-prometheus-and-autoscaler-setup)
+11. [Testing the Autoscaler Manually](#testing-the-autoscaler-manually)
+12. [Monitoring and Logs](#monitoring-and-logs)
+13. [Complete Cleanup](#complete-cleanup-all-resources)
 
 ---
 
@@ -597,8 +604,6 @@ Ensure your AWS credentials have permissions for:
 └─────────────────────────────────────────────────────────────┘
 ```
 
----
-
 ## Next Steps
 
 After the cluster is running, you can:
@@ -609,3 +614,298 @@ After the cluster is running, you can:
 4. **Deploy your microservices**
 
 Refer to the `SystemDesign.md` for the complete system architecture and remaining challenges.
+
+---
+
+## Phase 2: Prometheus and Autoscaler Setup
+
+This section covers deploying Prometheus for metrics collection and enabling the Lambda autoscaler.
+
+### Step 1: Deploy Prometheus on K3s
+
+SSH to the master node and apply the Kubernetes manifests:
+
+**Ubuntu/Linux:**
+```bash
+ssh -i ~/.ssh/k3s-key.pem ubuntu@<master_public_ip>
+```
+
+**Windows PowerShell:**
+```powershell
+ssh -i $env:USERPROFILE\.ssh\k3s-key.pem ubuntu@<master_public_ip>
+```
+
+Then apply the manifests:
+
+```bash
+# Create directory for manifests
+mkdir -p ~/k8s-manifests
+
+# Copy manifests from your local machine or create them
+# Option 1: Copy from local (run on local machine)
+# scp -i ~/.ssh/k3s-key.pem infra/k8s/*.yaml ubuntu@<master_ip>:~/k8s-manifests/
+
+# Option 2: Create files directly on master (already done in this case)
+# The manifests are in the infra/k8s/ directory
+
+# Apply Prometheus configuration
+sudo kubectl apply -f ~/k8s-manifests/prometheus-config.yaml
+sudo kubectl apply -f ~/k8s-manifests/prometheus-deployment.yaml
+sudo kubectl apply -f ~/k8s-manifests/prometheus-service.yaml
+
+# Apply kube-state-metrics for pending pod metrics
+sudo kubectl apply -f ~/k8s-manifests/kube-state-metrics.yaml
+```
+
+### Step 2: Verify Prometheus Deployment
+
+```bash
+# Check Prometheus pod is running
+sudo kubectl get pods -l app=prometheus
+
+# Check kube-state-metrics is running
+sudo kubectl get pods -l app=kube-state-metrics
+
+# Check services
+sudo kubectl get svc prometheus
+```
+
+Expected output:
+```
+NAME         TYPE       CLUSTER-IP     EXTERNAL-IP   PORT(S)          AGE
+prometheus   NodePort   10.43.x.x      <none>        9090:30090/TCP   1m
+```
+
+### Step 3: Test Prometheus Access
+
+From your local machine, test Prometheus is accessible:
+
+**Ubuntu/Linux:**
+```bash
+# Get Prometheus URL from Pulumi outputs
+pulumi stack output prometheus_url
+
+# Test Prometheus health
+curl http://<master_public_ip>:30090/-/healthy
+
+# Query a metric
+curl "http://<master_public_ip>:30090/api/v1/query?query=up"
+```
+
+**Windows PowerShell:**
+```powershell
+# Get Prometheus URL
+pulumi stack output prometheus_url
+
+# Test Prometheus (use browser or Invoke-RestMethod)
+Invoke-RestMethod -Uri "http://<master_public_ip>:30090/-/healthy"
+```
+
+### Step 4: Verify Lambda Autoscaler
+
+Check the Lambda function and EventBridge rule:
+
+```bash
+# Get Lambda function name
+pulumi stack output lambda_function
+
+# Get EventBridge rule name
+pulumi stack output eventbridge_rule
+
+# Check Lambda exists
+aws lambda get-function --function-name k3s-autoscaler
+
+# Check EventBridge rule
+aws events describe-rule --name k3s-autoscaler-schedule
+```
+
+### Step 5: Verify DynamoDB Table
+
+```bash
+# Get table name
+pulumi stack output dynamodb_table
+
+# Check table exists
+aws dynamodb describe-table --table-name k3s-cluster-state
+
+# View current state
+aws dynamodb get-item \
+    --table-name k3s-cluster-state \
+    --key '{"cluster_id": {"S": "k3s-main"}}'
+```
+
+---
+
+## Testing the Autoscaler Manually
+
+### Test 1: Trigger Lambda Manually
+
+Invoke the Lambda function manually to test:
+
+```bash
+# Invoke Lambda
+aws lambda invoke \
+    --function-name k3s-autoscaler \
+    --payload '{}' \
+    /dev/stdout
+
+# Check CloudWatch logs
+aws logs describe-log-groups --log-group-name-prefix /aws/lambda/k3s-autoscaler
+aws logs tail /aws/lambda/k3s-autoscaler --follow
+```
+
+### Test 2: Simulate High CPU Load (Scale UP)
+
+SSH to a worker node and generate CPU load:
+
+```bash
+# SSH to worker
+ssh -i ~/.ssh/k3s-key.pem ubuntu@<worker_public_ip>
+
+# Install stress tool
+sudo apt-get update && sudo apt-get install -y stress
+
+# Generate CPU load (run for 5 minutes)
+stress --cpu 4 --timeout 300
+
+# The autoscaler should detect high CPU and add a new worker
+```
+
+Monitor the autoscaler response:
+
+```bash
+# Watch Lambda logs
+aws logs tail /aws/lambda/k3s-autoscaler --follow
+
+# Check DynamoDB state
+aws dynamodb get-item \
+    --table-name k3s-cluster-state \
+    --key '{"cluster_id": {"S": "k3s-main"}}'
+
+# Check EC2 instances
+aws ec2 describe-instances \
+    --filters "Name=tag:Project,Values=k3s-cluster" \
+              "Name=instance-state-name,Values=running,pending" \
+    --query "Reservations[*].Instances[*].[InstanceId,Tags[?Key=='Name'].Value|[0]]" \
+    --output table
+```
+
+### Test 3: Verify Scale DOWN (Low CPU)
+
+After the load test, wait for the cooldown period (5 minutes) and observe:
+
+1. CPU should drop below 30%
+2. Lambda should detect low usage
+3. Oldest autoscaled worker should be terminated
+
+```bash
+# Check nodes in K3s
+ssh -i ~/.ssh/k3s-key.pem ubuntu@<master_public_ip>
+sudo kubectl get nodes
+
+# Watch for node removal
+watch -n 5 'sudo kubectl get nodes'
+```
+
+### Test 4: Verify Pending Pods Trigger
+
+Create pending pods to trigger scale-up:
+
+```bash
+# SSH to master
+ssh -i ~/.ssh/k3s-key.pem ubuntu@<master_public_ip>
+
+# Create pods that request more resources than available
+sudo kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+name: resource-hog
+namespace: default
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: resource-hog
+  template:
+    metadata:
+      labels:
+        app: resource-hog
+    spec:
+      containers:
+      - name: hog
+        image: nginx
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+EOF
+
+# Check for pending pods
+sudo kubectl get pods -l app=resource-hog
+
+# Lambda should detect pending pods and scale up
+```
+
+Clean up after testing:
+
+```bash
+sudo kubectl delete deployment resource-hog
+```
+
+---
+
+## Monitoring and Logs
+
+### CloudWatch Logs
+
+View Lambda execution logs:
+
+```bash
+# Get log stream names
+aws logs describe-log-streams \
+    --log-group-name /aws/lambda/k3s-autoscaler \
+    --order-by LastEventTime \
+    --descending
+
+# View recent logs
+aws logs tail /aws/lambda/k3s-autoscaler --since 1h
+```
+
+### Prometheus Queries (PromQL)
+
+Access Prometheus UI at `http://<master_ip>:30090` and try these queries:
+
+| Query | Description |
+|-------|-------------|
+| `100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)` | Average CPU usage % |
+| `kube_pod_status_phase{phase="Pending"}` | Pending pods |
+| `count(kube_node_status_condition{condition="Ready",status="true"})` | Ready node count |
+| `node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100` | Memory available % |
+
+---
+
+## Phase 2 Cleanup
+
+To clean up Phase 2 resources after testing:
+
+```bash
+# Delete Prometheus from K3s
+ssh -i ~/.ssh/k3s-key.pem ubuntu@<master_public_ip>
+sudo kubectl delete -f ~/k8s-manifests/
+
+# The Lambda, DynamoDB, and EventBridge will be cleaned up with pulumi destroy
+```
+
+---
+
+## Complete Cleanup (All Resources)
+
+```bash
+cd infra
+pulumi destroy
+
+# Clean up SSM parameters
+aws ssm delete-parameter --name "/k3s/join-token"
+aws ssm delete-parameter --name "/k3s/master-ip"
+aws ssm delete-parameter --name "/k3s/master-public-ip"
+```

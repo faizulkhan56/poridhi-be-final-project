@@ -88,6 +88,18 @@ def create_security_groups(config: dict, vpc_id):
         description="Allow all outbound traffic",
     )
     
+    # Prometheus NodePort (for Lambda autoscaler access)
+    aws.ec2.SecurityGroupRule(
+        "master-prometheus-ingress",
+        type="ingress",
+        from_port=30090,
+        to_port=30090,
+        protocol="tcp",
+        cidr_blocks=["0.0.0.0/0"],  # Lambda needs access
+        security_group_id=master_sg.id,
+        description="Prometheus NodePort for autoscaler",
+    )
+    
     # ===== Worker Security Group Rules =====
     
     # SSH access (restrict to your IP in production)
