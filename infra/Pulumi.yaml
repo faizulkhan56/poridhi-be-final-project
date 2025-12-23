@@ -1,0 +1,6 @@
+name: k3s-cluster
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+description: K3s Kubernetes cluster on AWS with auto-scaling infrastructure
