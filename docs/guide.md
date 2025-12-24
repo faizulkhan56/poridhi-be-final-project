@@ -437,24 +437,62 @@ ssh -i $env:USERPROFILE\.ssh\k3s-key.pem ubuntu@<master_public_ip>
 sudo kubectl get nodes
 ```
 
-### Option 2: Copy Kubeconfig Locally
+### Option 2: Copy Kubeconfig Locally (Recommended)
 
-Copy the kubeconfig to your local machine:
+This allows you to control the cluster from your local Ubuntu/Linux machine without SSHing to the master.
+
+#### 1. Install `kubectl` Locally (Ubuntu/Linux)
+
+If you haven't installed `kubectl` on your local machine yet:
+
+```bash
+# Download latest release
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# Install binary
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+# Verify installation
+kubectl version --client
+```
+
+#### 2. Configure Remote Access
+
+Copy the kubeconfig from the master node to your local machine:
 
 **Ubuntu/Linux:**
 ```bash
-# Create .kube directory if it doesn't exist
+# 1. Create .kube directory locally
 mkdir -p ~/.kube
 
-# Copy kubeconfig from master
+# 2. Copy kubeconfig from master (Requires SSH key)
 scp -i ~/.ssh/k3s-key.pem ubuntu@<master_public_ip>:/etc/rancher/k3s/k3s.yaml ~/.kube/k3s-config
 
-# Update the server address in the config
-# Replace 127.0.0.1 with master's public IP
+# 3. Update server IP in config (Change 127.0.0.1 to Master Public IP)
 sed -i 's/127.0.0.1/<master_public_ip>/g' ~/.kube/k3s-config
 
-# Use the config
+# 4. Set KUBECONFIG environment variable
 export KUBECONFIG=~/.kube/k3s-config
+
+# 5. Verify connectivity
+kubectl get nodes
+```
+
+**Windows PowerShell:**
+```powershell
+# 1. Create .kube directory
+mkdir -p $HOME\.kube
+
+# 2. Copy kubeconfig (requires SCP, e.g., from Git Bash or OpenSSH)
+scp -i $env:USERPROFILE\.ssh\k3s-key.pem ubuntu@<master_public_ip>:/etc/rancher/k3s/k3s.yaml $HOME\.kube\k3s-config
+
+# 3. Replace IP (Manual step or PowerShell)
+(Get-Content $HOME\.kube\k3s-config).Replace('127.0.0.1', '<master_public_ip>') | Set-Content $HOME\.kube\k3s-config
+
+# 4. Set environment variable
+$env:KUBECONFIG="$HOME\.kube\k3s-config"
+
+# 5. Verify
 kubectl get nodes
 ```
 

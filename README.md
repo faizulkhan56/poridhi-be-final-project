@@ -1,125 +1,213 @@
-# K3s Autoscaler on AWS
+# K3s Intelligent Autoscaler on AWS
 
-A custom K3s Kubernetes cluster autoscaler on AWS, using Pulumi for infrastructure as code.
+## 📖 Project Overview
+This project implements a **custom, serverless autoscaler** for a K3s Kubernetes cluster on AWS. Unlike standard autoscalers that rely on heavy infrastructure, this solution uses **AWS Lambda, EventBridge, and Prometheus** to provide a cost-effective, event-driven scaling mechanism.
 
-## Overview
+**Problem Statement:**
+Deploying Kubernetes on bare EC2 requires robust autoscaling. Standard tools often require running dedicated pods (Cluster Autoscaler) that consume cluster resources. We needed an external, serverless controller that could scale the worker node pool based on real-time metrics (CPU & Pending Pods) while handling distributed system challenges like race conditions and graceful termination.
 
-This project implements an automated K3s cluster on AWS with:
-- **K3s Master Node** (t3.medium) - Control plane
-- **K3s Worker Nodes** (t3.small) - Auto-scaling worker nodes
-- **Auto-join Mechanism** - Workers automatically join the cluster via SSM Parameter Store
-- **Multi-AZ Deployment** - High availability across 2 availability zones
+---
 
-## Architecture
+## 🏗️ Architecture
 
+The system operates entirely via AWS managed services and a K3s cluster.
+
+### System Flow
+```mermaid
+graph TD
+    subgraph "AWS Cloud"
+        EB[EventBridge Scheduler] -->|Trigger (Every 2m)| Lambda[Autoscaler Lambda]
+        
+        subgraph "VPC Services"
+            Lambda -->|1. Lock/State| DDB[(DynamoDB)]
+            Lambda -->|2. Scrape Metrics| Prom[Prometheus (NodePort:30090)]
+            Lambda -->|3. Manage Instances| EC2[EC2 API]
+            SSM[SSM Parameter Store] -.->|Join Token| EC2
+        end
+        
+        subgraph "K3s Cluster"
+            Master[Master Node]
+            Worker1[Worker Node 1]
+            Worker2[Worker Node 2]
+            Prom -.->|Internal| Master & Worker1 & Worker2
+        end
+    end
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        AWS Cloud                            │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │                   VPC (10.0.0.0/16)                   │  │
-│  │  ┌─────────────────────┐  ┌─────────────────────┐     │  │
-│  │  │   Public Subnet 1   │  │   Public Subnet 2   │     │  │
-│  │  │   (AZ-1)            │  │   (AZ-2)            │     │  │
-│  │  │  ┌───────────────┐  │  │  ┌───────────────┐  │     │  │
-│  │  │  │  K3s Master   │  │  │  │  K3s Worker   │  │     │  │
-│  │  │  └───────────────┘  │  │  └───────────────┘  │     │  │
-│  │  │  ┌───────────────┐  │  │                     │     │  │
-│  │  │  │  K3s Worker   │  │  │                     │     │  │
-│  │  │  └───────────────┘  │  │                     │     │  │
-│  │  └─────────────────────┘  └─────────────────────┘     │  │
-│  └───────────────────────────────────────────────────────┘  │
-│  ┌─────────────────────┐                                    │
-│  │  SSM Parameter Store │ (Join Token Storage)              │
-│  └─────────────────────┘                                    │
-└─────────────────────────────────────────────────────────────┘
+
+### Network Diagram
+```mermaid
+graph TB
+    subgraph "VPC (10.0.0.0/16)"
+        IGW[Internet Gateway]
+        
+        subgraph "Public Subnet 1 (AZ-A)"
+            Master[Master Node]
+        end
+        
+        subgraph "Public Subnet 2 (AZ-B)"
+            Worker[Worker Nodes]
+        end
+        
+        IGW --> Master & Worker
+        
+        %% Security Groups
+        MasterSG[SG: Master] <-->|VXLAN (UDP/8472)| WorkerSG[SG: Workers]
+        MasterSG <-->|Kubelet (TCP/10250)| WorkerSG
+        Lambda -->|Prometheus (TCP/30090)| MasterSG
+    end
 ```
 
-## Prerequisites
+---
 
-- Python 3.8+
-- Pulumi CLI
-- AWS CLI configured with admin credentials
-- SSH key pair created in AWS
+## 🛠️ Tools & Technologies
 
-## Quick Start
+| Tool | Purpose | Justification |
+|------|---------|---------------|
+| **K3s** | Kubernetes Distribution | Lightweight (<100MB binary), perfect for cost-effective edge/cloud clusters. |
+| **Pulumi (Python)** | Infrastructure as Code | Allows using real Python code for loops/logic, superior to HCL for complex event-driven setups. |
+| **AWS Lambda** | Autoscaler Logic | Serverless, zero-maintenance, pays only for execution time (<$0.10/mo). |
+| **Prometheus** | Metric Collection | Industry standard, scrapes internal K8s metrics (pod phases, node CPU). |
+| **DynamoDB** | State & Locking | Microsecond latency for distributed locking (Compare-and-Swap). |
+| **EventBridge** | Scheduler | Triggers scaling checks deterministically without a persistent daemon. |
 
+---
+
+## 💻 Infrastructure as Code (Pulumi)
+
+The entire infrastructure uses Python-based Pulumi.
+
+### Project Structure
+```text
+.
+├── infra/
+│   ├── lambda/             # Lambda source code
+│   │   ├── handler.py      # Main entry point
+│   │   ├── scaler.py       # Decision logic
+│   │   └── state.py        # DynamoDB locking
+│   ├── k8s/                # Kubernetes manifests
+│   ├── __main__.py         # Main Pulumi stack definition
+│   ├── dynamodb.py         # DynamoDB resource
+│   ├── lambda_autoscaler.py# Lambda & IAM resources
+│   └── vpc.py              # VPC & Networking
+└── docs/                   # Documentation
+```
+
+---
+
+## 🧩 Component Specifications
+
+### 1. Autoscaler Lambda Logic
+The heart of the system is `infra/lambda/scaler.py`. It implements a decision matrix:
+
+| Condition | Action | Reason |
+|-----------|--------|--------|
+| `Pending Pods > 0` | **Scale UP** | Workload is unschedulable. Immediate response required. |
+| `Avg CPU > 70%` | **Scale UP** | Cluster is saturating. |
+| `Avg CPU < 30%` | **Scale DOWN** | Wasted resources. |
+| `Nodes >= 10` | **Pass** | Max limit reached. |
+| `CoolDown Active` | **Pass** | Prevent thrashing. |
+
+### 2. DynamoDB Schema
+Used for distributed locking.
+*   **Table Name:** `k3s-cluster-state`
+*   **Key:** `cluster_id` (String)
+
+**Example Item:**
+```json
+{
+  "cluster_id": "k3s-main",
+  "scaling_in_progress": false,
+  "node_count": 3,
+  "last_scale_time": "2025-12-24T12:00:00Z"
+}
+```
+
+### 3. Prometheus Config
+Modified to expose via NodePort for Lambda access.
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+spec:
+  type: NodePort
+  ports:
+    - port: 9090
+      nodePort: 30090 # External access for Lambda
+```
+
+---
+
+## 🧠 Design Challenges & Solutions
+
+### 1. Race Condition Prevention
+**Challenge:** Two Lambda functions triggering at the same time could double-provision nodes.
+**Solution:** DynamoDB **Conditional Writes**.
+```python
+# infra/lambda/state.py
+table.update_item(
+    ConditionExpression="attribute_not_exists(scaling_in_progress) OR scaling_in_progress = :false",
+    UpdateExpression="SET scaling_in_progress = :true"
+)
+```
+
+### 2. Node Join Automation
+**Challenge:** New nodes need credentials to join the cluster securely.
+**Solution:** **AWS SSM Parameter Store** injects tokens into User Data.
 ```bash
-# Navigate to infrastructure directory
-cd infra
-
-# Create and activate virtual environment
-python3 -m venv venv
-source venv/bin/activate  # Linux/macOS
-# .\venv\Scripts\Activate.ps1  # Windows PowerShell
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Initialize Pulumi stack
-pulumi stack init dev
-
-# Deploy
-pulumi up
+# infra/scripts/worker_userdata.sh
+TOKEN=$(aws ssm get-parameter --name "/k3s/join-token" ...)
+curl -sfL https://get.k3s.io | K3S_URL=$URL K3S_TOKEN=$TOKEN sh -
 ```
 
-## Project Structure
-
-```
-├── README.md                 # This file
-├── SystemDesign.md           # Complete system design document
-├── docs/
-│   └── guide.md              # Step-by-step deployment guide
-└── infra/
-    ├── Pulumi.yaml           # Pulumi project config
-    ├── Pulumi.dev.yaml       # Dev stack configuration
-    ├── requirements.txt      # Python dependencies
-    ├── __main__.py           # Main entry point
-    ├── config.py             # Configuration loader
-    ├── vpc.py                # VPC & networking
-    ├── security_groups.py    # Security groups
-    ├── master.py             # K3s master node
-    ├── workers.py            # K3s worker nodes
-    └── scripts/
-        ├── master_userdata.sh  # Master bootstrap script
-        └── worker_userdata.sh  # Worker bootstrap script
+### 3. Graceful Scale Down
+**Challenge:** Random termination kills active pods.
+**Solution:** The autoscaler explicitly selects the **Oldest Autoscaled Node** and (in production) would drain it.
+```python
+# infra/lambda/ec2_manager.py
+# Filter only instances managed by us, then sort by LaunchTime
+instances.sort(key=lambda x: x['LaunchTime'])
+target = instances[0] # Terminate oldest
 ```
 
-## Configuration
+---
 
-Edit `infra/Pulumi.dev.yaml` to customize:
+## 🚀 Deployment
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `aws:region` | ap-southeast-1 | AWS region |
-| `k3s-cluster:master_instance_type` | t3.medium | Master instance type |
-| `k3s-cluster:worker_instance_type` | t3.small | Worker instance type |
-| `k3s-cluster:worker_count` | 2 | Number of worker nodes |
-| `k3s-cluster:ssh_key_name` | k3s-key | SSH key pair name |
+See [deployment guide](docs/guide.md) for full steps.
 
-## Documentation
+1.  **Deploy Infra**: `cd infra && pulumi up`
+2.  **Apply K8s**: `kubectl apply -f infra/k8s/`
+3.  **Verify**: Access Prometheus at `http://<MASTER_IP>:30090`
 
-- [Deployment Guide](docs/guide.md) - Complete step-by-step instructions
-- [System Design](SystemDesign.md) - Full system design requirements
+---
 
-## Cleanup
+## 🧪 Testing Results
 
-```bash
-cd infra
-pulumi destroy
+We verified the system with two scenarios:
 
-# Clean up SSM parameters
-aws ssm delete-parameter --name "/k3s/join-token"
-aws ssm delete-parameter --name "/k3s/master-ip"
-aws ssm delete-parameter --name "/k3s/master-public-ip"
-```
+### Scenario A: High CPU Load
+*   **Action**: Ran `stress --cpu 4` on a worker.
+*   **Result**: Prometheus `node_cpu` metric spiked. Lambda detected >70% CPU.
+*   **Outcome**: New worker (`worker-i-0ada...`) launched automatically after 5 minutes.
 
-## Roadmap
+### Scenario B: Pending Pods (Fast Path)
+*   **Action**: Scaled Nginx deployment to 50 replicas.
+*   **Result**: `kube_pod_status_phase{phase="Pending"}` became > 0.
+*   **Outcome**: Lambda triggered **immediate** Scale Up, bypassing CPU average window.
 
-- [x] Phase 1: K3s cluster infrastructure
-- [ ] Phase 2: Prometheus monitoring
-- [ ] Phase 3: Lambda autoscaler
-- [ ] Phase 4: DynamoDB state management
+---
 
-## License
+## 💰 Cost Analysis
 
-MIT
+**Before Autoscaler (Static Cluster):**
+*   3 x t2.medium (Always on): ~$100/mo
+*   Over-provisioned at night, under-provisioned at peak.
+
+**After Autoscaler:**
+*   **Base**: 2 x t2.small (Reserved): ~$20/mo
+*   **Burst**: Extra nodes only when needed.
+*   **Lambda Cost**:
+    *   0.3s duration * 21,600 invocations/mo
+    *   Total: **<$0.05/mo**
+*   **Result**: ~60-80% Cost Reduction for variable workloads.
