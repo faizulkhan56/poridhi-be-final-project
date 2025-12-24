@@ -142,7 +142,7 @@ scrape_configs:
 **Key Metrics (PromQL):**
 | Metric Name | PromQL Query | Purpose |
 |-------------|--------------|---------|
-| **Avg CPU Usage** | `100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)` | Primary scaling metric |
+| **Avg CPU Usage** | `sum(rate(container_cpu_usage_seconds_total{id="/"}[5m])) / sum(machine_cpu_cores) * 100` | Primary scaling metric (cAdvisor) |
 | **Pending Pods** | `kube_pod_status_phase{phase="Pending"}` | Fast-path scale up trigger |
 | **Ready Nodes** | `count(kube_node_status_condition{condition="Ready",status="true"})` | Constraint checking |
 

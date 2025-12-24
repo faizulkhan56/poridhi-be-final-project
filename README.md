@@ -136,6 +136,13 @@ spec:
       nodePort: 30090 # External access for Lambda
 ```
 
+**Key Metric (CPU):**
+The autoscaler uses **cAdvisor** metrics (built-in to Kubelet) to ensure compatibility without needing extra exporters.
+```promql
+sum(rate(container_cpu_usage_seconds_total{id="/"}[5m])) / sum(machine_cpu_cores) * 100
+```
+*   Calculates total CPU usage of all root containers divided by total machine cores.
+
 ---
 
 ## 🧠 Design Challenges & Solutions

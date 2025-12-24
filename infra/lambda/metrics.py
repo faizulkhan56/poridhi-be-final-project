@@ -37,12 +37,11 @@ class PrometheusMetrics:
     def get_average_cpu(self) -> float:
         """
         Get average CPU usage across all nodes.
+        Uses cAdvisor metrics since node-exporter might not be present.
         Returns percentage (0-100).
         """
-        # Query for CPU usage percentage
-        query = '''
-        100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
-        '''
+        # Query: Sum of CPU usage of all root containers / Total cores * 100
+        query = 'sum(rate(container_cpu_usage_seconds_total{id="/"}[5m])) / sum(machine_cpu_cores) * 100'
         
         try:
             result = self._query(query.strip())
@@ -52,10 +51,10 @@ class PrometheusMetrics:
                 if results:
                     value = float(results[0].get("value", [0, 0])[1])
                     return round(value, 2)
-            return 50.0  # Default neutral value
+            return 0.0  # Default low value to avoid accidental scaling
         except Exception as e:
             logger.warning(f"Failed to get CPU metrics: {e}")
-            return 50.0
+            return 0.0
     
     def get_pending_pods(self) -> int:
         """Get count of pending pods in the cluster."""
