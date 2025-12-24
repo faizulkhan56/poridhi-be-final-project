@@ -12,24 +12,24 @@ The system follows a serverless, event-driven architecture to automatically scal
 ```mermaid
 graph TD
     subgraph "AWS Cloud"
-        EB[EventBridge Scheduler] -->|Trigger (Every 2m)| Lambda[Autoscaler Lambda]
+        EB["EventBridge Scheduler"] -->|"Trigger (Every 2m)"| Lambda["Autoscaler Lambda"]
         
         subgraph "VPC"
-            Lambda -->|1. Get/Set Lock| DDB[(DynamoDB State)]
-            Lambda -->|2. Query Metrics| Prom[Prometheus (NodePort 30090)]
-            Lambda -->|3. Provision/Terminate| EC2[EC2 API]
+            Lambda -->|"1. Get/Set Lock"| DDB[("DynamoDB State")]
+            Lambda -->|"2. Query Metrics"| Prom["Prometheus (NodePort 30090)"]
+            Lambda -->|"3. Provision/Terminate"| EC2["EC2 API"]
             
             subgraph "K3s Cluster"
-                Master[Master Node]
-                Worker1[Worker Node 1]
-                WorkerN[Worker Node N]
-                Prom -.->|Scrape| Master
-                Prom -.->|Scrape| Worker1
-                Prom -.->|Scrape| WorkerN
+                Master["Master Node"]
+                Worker1["Worker Node 1"]
+                WorkerN["Worker Node N"]
+                Prom -.->|"Scrape"| Master
+                Prom -.->|"Scrape"| Worker1
+                Prom -.->|"Scrape"| WorkerN
             end
         end
         
-        SSM[SSM Parameter Store] -.->|Join Token| WorkerN
+        SSM["SSM Parameter Store"] -.->|"Join Token"| WorkerN
     end
 ```
 
@@ -39,25 +39,25 @@ The infrastructure is deployed in a VPC with public subnets across availability 
 ```mermaid
 graph TB
     subgraph "VPC (10.0.0.0/16)"
-        IGW[Internet Gateway]
+        IGW["Internet Gateway"]
         
         subgraph "AZ 1"
-            Subnet1[Public Subnet 1 (10.0.1.0/24)]
-            Master[Master Node (t3.medium)]
+            Subnet1["Public Subnet 1 (10.0.1.0/24)"]
+            Master["Master Node (t3.medium)"]
         end
         
         subgraph "AZ 2"
-            Subnet2[Public Subnet 2 (10.0.2.0/24)]
-            Worker[Worker Nodes (t2.small)]
+            Subnet2["Public Subnet 2 (10.0.2.0/24)"]
+            Worker["Worker Nodes (t2.small)"]
         end
         
         IGW --> Subnet1
         IGW --> Subnet2
         
         %% Security Group Flow
-        MasterSG[SG: Master] <-->|VXLAN/8472| WorkerSG[SG: Workers]
-        MasterSG <-->|Kubelet/10250| WorkerSG
-        Lambda -->|Port 30090| MasterSG
+        MasterSG["SG: Master"] <-->|"VXLAN/8472"| WorkerSG["SG: Workers"]
+        MasterSG <-->|"Kubelet/10250"| WorkerSG
+        Lambda -->|"Port 30090"| MasterSG
     end
 ```
 

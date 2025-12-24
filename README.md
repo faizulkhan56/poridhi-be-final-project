@@ -16,20 +16,20 @@ The system operates entirely via AWS managed services and a K3s cluster.
 ```mermaid
 graph TD
     subgraph "AWS Cloud"
-        EB[EventBridge Scheduler] -->|Trigger (Every 2m)| Lambda[Autoscaler Lambda]
+        EB["EventBridge Scheduler"] -->|"Trigger (Every 2m)"| Lambda["Autoscaler Lambda"]
         
         subgraph "VPC Services"
-            Lambda -->|1. Lock/State| DDB[(DynamoDB)]
-            Lambda -->|2. Scrape Metrics| Prom[Prometheus (NodePort:30090)]
-            Lambda -->|3. Manage Instances| EC2[EC2 API]
-            SSM[SSM Parameter Store] -.->|Join Token| EC2
+            Lambda -->|"1. Lock/State"| DDB[("DynamoDB")]
+            Lambda -->|"2. Scrape Metrics"| Prom["Prometheus (NodePort:30090)"]
+            Lambda -->|"3. Manage Instances"| EC2["EC2 API"]
+            SSM["SSM Parameter Store"] -.->|"Join Token"| EC2
         end
         
         subgraph "K3s Cluster"
-            Master[Master Node]
-            Worker1[Worker Node 1]
-            Worker2[Worker Node 2]
-            Prom -.->|Internal| Master & Worker1 & Worker2
+            Master["Master Node"]
+            Worker1["Worker Node 1"]
+            Worker2["Worker Node 2"]
+            Prom -.->|"Internal"| Master & Worker1 & Worker2
         end
     end
 ```
@@ -38,22 +38,22 @@ graph TD
 ```mermaid
 graph TB
     subgraph "VPC (10.0.0.0/16)"
-        IGW[Internet Gateway]
+        IGW["Internet Gateway"]
         
         subgraph "Public Subnet 1 (AZ-A)"
-            Master[Master Node]
+            Master["Master Node"]
         end
         
         subgraph "Public Subnet 2 (AZ-B)"
-            Worker[Worker Nodes]
+            Worker["Worker Nodes"]
         end
         
         IGW --> Master & Worker
         
         %% Security Groups
-        MasterSG[SG: Master] <-->|VXLAN (UDP/8472)| WorkerSG[SG: Workers]
-        MasterSG <-->|Kubelet (TCP/10250)| WorkerSG
-        Lambda -->|Prometheus (TCP/30090)| MasterSG
+        MasterSG["SG: Master"] <-->|"VXLAN (UDP/8472)"| WorkerSG["SG: Workers"]
+        MasterSG <-->|"Kubelet (TCP/10250)"| WorkerSG
+        Lambda -->|"Prometheus (TCP/30090)"| MasterSG
     end
 ```
 
